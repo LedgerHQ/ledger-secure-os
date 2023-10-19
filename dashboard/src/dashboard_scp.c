@@ -422,6 +422,11 @@ bolos_err_t dashboard_apdu_validate_certificate(uint8_t* apdu_buffer,
         memcpy(G_dashboard.last_accepted_public.W,
                apdu_buffer + off_ESpub_len + 1,
                G_dashboard.last_accepted_public.W_len);
+
+        // Not a trusted issuer anymore
+        bolos_set_trust_issuer(0);
+        G_dashboard.transient_ctx.auth_source_flags &=
+            ~(APPLICATION_FLAG_ISSUER);
         goto accept_certificate;
       }
       return SWO_SEC_SIG_07;

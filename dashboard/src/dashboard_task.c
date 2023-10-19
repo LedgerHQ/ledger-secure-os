@@ -642,8 +642,8 @@ static void dashboard_task_core(void) {
           // skip the finally and wait for next apdu immediately
           continue;
         }
-        //#error FIND A WAY FOR IO_TASK TO NOTIFY BOLOS TO RESET
-        // EXCEPTION_IO_RESET is returned through the yield status
+        // #error FIND A WAY FOR IO_TASK TO NOTIFY BOLOS TO RESET
+        //  EXCEPTION_IO_RESET is returned through the yield status
         CATCH_OTHER(e) {
           if (e != SWO_SUCCESS) {
             // redisplay the default screen (kill the current load sequence

@@ -183,67 +183,85 @@ bolos_err_t dashboard_apdu_secure_recover_validate_backup_data(
   uint32_t offset;
   bolos_err_t err = SWO_OK;
   uint8_t state;
+  uint8_t backup_data[IO_APDU_BUFFER_SIZE] = {0};
   cx_sha256_t hash_ctx;
 
   // Check that Recover secure channel is established
-  if (!is_recover_scp_set()) {
+  if (!is_recover_scp_set() || ((G_dashboard.transient_ctx.recover.state &
+                                 STATE_RECOVER_MUTUAL_AUTHENTICATED) !=
+                                STATE_RECOVER_MUTUAL_AUTHENTICATED)) {
     return SWO_APD_STA_22;
+  }
+
+  if ((G_dashboard.transient_ctx.recover.state &
+       STATE_RECOVER_CONFIRM_BACKUP) == STATE_RECOVER_CONFIRM_BACKUP) {
+    return SWO_APD_STA_3D;
   }
 
   if (in_length <= 2) {
     return SWO_APD_DAT_1C;
   }
 
-  if (in_length < RECOVER_BACKUP_ID_LEN + 1) {
-    return SWO_APD_DAT_1B;
+  offset = APDU_SECURE_DATA_OFF;
+
+  if (apdu_buffer[offset] <= AES_SIV_TAG_LEN) {
+    return SWO_APD_DAT_1C;
   }
 
-  offset = APDU_SECURE_DATA_OFF;
+  if ((err = dashboard_decrypt_and_verify(
+           G_dashboard.transient_ctx.recover.derived_key,
+           apdu_buffer + offset + 1 + AES_SIV_TAG_LEN,
+           apdu_buffer[offset] - AES_SIV_TAG_LEN, backup_data,
+           apdu_buffer + offset + 1))) {
+    return err;
+  }
+
+  offset = 0;
   // Store the backup id and the backup data needed by the 'validate backup data
   // hash' command
-  memcpy(G_dashboard.transient_ctx.recover.info.backup_id, apdu_buffer + offset,
+  memcpy(G_dashboard.transient_ctx.recover.info.backup_id, backup_data + offset,
          RECOVER_BACKUP_ID_LEN);
   offset += RECOVER_BACKUP_ID_LEN;
 
-  if (apdu_buffer[offset] > RECOVER_BACKUP_NAME_MAXLEN) {
+  if (backup_data[offset] > RECOVER_BACKUP_NAME_MAXLEN) {
     return SWO_APD_DAT_2B;
   }
 
   // Hash the backup data
   cx_sha256_init_no_throw(&hash_ctx);
-  cx_sha256_update(&hash_ctx, apdu_buffer + offset + 1, apdu_buffer[offset]);
+  cx_sha256_update(&hash_ctx, backup_data + offset + 1, backup_data[offset]);
 
-  offset += 1 + apdu_buffer[offset];
+  offset += 1 + backup_data[offset];
 
   memset(&G_ux_params, 0, sizeof(G_ux_params));
   G_ux_params.ux_id = BOLOS_UX_CONSENT_RECOVER_CONFIRM_USER;
-  if ((RECOVER_FIRSTNAME_TAG == apdu_buffer[offset++]) &&
-      (apdu_buffer[offset] <= RECOVER_FIRST_NAME_MAXLEN)) {
-    dashboard_recover_get_info(&hash_ctx, apdu_buffer,
+  if ((RECOVER_FIRSTNAME_TAG == backup_data[offset++]) &&
+      (backup_data[offset] <= RECOVER_FIRST_NAME_MAXLEN)) {
+    dashboard_recover_get_info(&hash_ctx, backup_data,
                                G_ux_params.u.recover.first_name, &offset);
   } else {
     return SWO_APD_DAT_2E;
   }
-  if ((RECOVER_NAME_TAG == apdu_buffer[offset++]) &&
-      (apdu_buffer[offset] <= RECOVER_LAST_NAME_MAXLEN)) {
-    dashboard_recover_get_info(&hash_ctx, apdu_buffer,
+  if ((RECOVER_NAME_TAG == backup_data[offset++]) &&
+      (backup_data[offset] <= RECOVER_LAST_NAME_MAXLEN)) {
+    dashboard_recover_get_info(&hash_ctx, backup_data,
                                G_ux_params.u.recover.last_name, &offset);
   } else {
     return SWO_APD_DAT_2F;
   }
-  if ((RECOVER_BIRTH_TAG == apdu_buffer[offset++]) &&
-      (apdu_buffer[offset] <= RECOVER_DATE_OF_BIRTH_MAXLEN)) {
-    dashboard_recover_get_info(&hash_ctx, apdu_buffer,
+  if ((RECOVER_BIRTH_TAG == backup_data[offset++]) &&
+      (backup_data[offset] <= RECOVER_DATE_OF_BIRTH_MAXLEN)) {
+    dashboard_recover_get_info(&hash_ctx, backup_data,
                                G_ux_params.u.recover.date_of_birth, &offset);
   } else {
     return SWO_APD_DAT_30;
   }
-  if ((RECOVER_PLACE_TAG == apdu_buffer[offset]) &&
-      ((0 == apdu_buffer[offset + 1]))) {
+  if ((RECOVER_PLACE_TAG == backup_data[offset]) &&
+      ((0 == backup_data[offset + 1]))) {
     // Do not display anything for "place of birth"
-  } else if ((RECOVER_PLACE_TAG == apdu_buffer[offset++]) &&
-             ((apdu_buffer[offset] <= RECOVER_PLACE_OF_BIRTH_MAXLEN))) {
-    dashboard_recover_get_info(&hash_ctx, apdu_buffer,
+  } else if ((RECOVER_PLACE_TAG == backup_data[offset++]) &&
+             ((backup_data[offset] <= RECOVER_PLACE_OF_BIRTH_MAXLEN))) {
+    dashboard_recover_get_info(&hash_ctx, backup_data,
                                G_ux_params.u.recover.place_of_birth, &offset);
   } else {
     return SWO_APD_DAT_31;
@@ -258,7 +276,6 @@ bolos_err_t dashboard_apdu_secure_recover_validate_backup_data(
   cx_sha256_final(&hash_ctx,
                   G_dashboard.transient_ctx.recover.info.backup_data_hash);
 
-  G_dashboard.transient_ctx.host_chain_length = 0;
   G_dashboard.transient_ctx.recover.state = STATE_RECOVER_CONFIRM_BACKUP;
   G_dashboard.transient_ctx.recover.share_number = 0;
   *out_length = 0;
@@ -286,7 +303,6 @@ bolos_err_t dashboard_apdu_secure_recover_validate_certificate(
   cx_sha256_t hash_ctx;
   uint8_t hash[CX_SHA256_SIZE];
   bolos_err_t err = SWO_OK;
-  uint8_t state;
   bolos_bool_t crc_custom_ca;
 
   // Check that Recover secure channel is established
@@ -302,18 +318,6 @@ bolos_err_t dashboard_apdu_secure_recover_validate_certificate(
     explicit_bzero(&G_dashboard.transient_ctx.recover,
                    sizeof(G_dashboard.transient_ctx.recover));
     return SWO_SEC_STA_0D;
-  }
-
-  if ((G_dashboard.transient_ctx.recover.state &
-       STATE_RECOVER_CONFIRM_BACKUP) == 0) {
-    // Device was turned off after 'validate_backup_data'
-    os_perso_recover_state(&state, GET_STATE);
-    // The 4 most significant bits set STATE_RECOVER_CONFIRM_BACKUP
-    // and the 4 less significant bits set
-    // ONBOARDING_STATUS_RECOVER_RESTORE_SEED
-    if (RECOVER_CONFIRM_BACKUP_STATE(state) != STATE_RECOVER_CONFIRM_BACKUP) {
-      return SWO_APD_STA_33;
-    }
   }
 
   // Offset corresponding to the certificate version
@@ -355,7 +359,6 @@ bolos_err_t dashboard_apdu_secure_recover_validate_certificate(
                                         apdu_buffer + sig_offset + 1,
                                         apdu_buffer[sig_offset])) {
       G_dashboard.transient_ctx.auth_source_flags = APPLICATION_FLAG_ISSUER;
-      ;
       // Enforce the state to STATE_MUTUAL_AUTHENTICATED for further uses of
       // the secure channel
       dashboard_accept_certificate(apdu_buffer + offset + 1,
@@ -451,9 +454,9 @@ bolos_err_t dashboard_apdu_secure_recover_validate_backup_data_hash(
   uint8_t state;
   bolos_err_t err = SWO_OK;
 
-  if (!is_recover_scp_set() || ((G_dashboard.transient_ctx.recover.state &
-                                 STATE_RECOVER_MUTUAL_AUTHENTICATED) !=
-                                STATE_RECOVER_MUTUAL_AUTHENTICATED)) {
+  if (!is_recover_scp_set() ||
+      ((G_dashboard.transient_ctx.recover.state &
+        STATE_RECOVER_CONFIRM_BACKUP) != STATE_RECOVER_CONFIRM_BACKUP)) {
     return SWO_APD_STA_32;
   }
 
@@ -516,7 +519,10 @@ bolos_err_t dashboard_apdu_secure_recover_validate_backup_data_hash(
       dashboard_secure_recover_display_code();
     }
   }
-
+  G_dashboard.transient_ctx.recover.state =
+      STATE_RECOVER_HASH_VALIDATED |
+      (G_dashboard.transient_ctx.recover.state & STATE_RECOVER_CONFIRM_MASK);
+  G_dashboard.transient_ctx.host_chain_length = 0;
   *out_length = strlen(RECOVER_CONFIRM_RESTORE) + AES_SIV_TAG_LEN;
   return err;
 }
@@ -537,9 +543,9 @@ bolos_err_t dashboard_apdu_secure_recover_get_share(uint8_t* apdu_buffer,
     return SWO_SEC_STA_0D;
   }
 
-  if (!is_recover_scp_set() || ((G_dashboard.transient_ctx.recover.state &
-                                 STATE_RECOVER_MUTUAL_AUTHENTICATED) !=
-                                STATE_RECOVER_MUTUAL_AUTHENTICATED)) {
+  if (!is_recover_scp_set() ||
+      ((G_dashboard.transient_ctx.recover.state &
+        STATE_RECOVER_HASH_VALIDATED) != STATE_RECOVER_HASH_VALIDATED)) {
     return SWO_APD_STA_2D;
   }
 
@@ -694,6 +700,10 @@ bolos_err_t dashboard_apdu_secure_recover_validate_commit(uint8_t* apdu_buffer,
   }
 
   offset = APDU_SECURE_DATA_OFF + 1;
+  if (apdu_buffer[offset] <= AES_SIV_TAG_LEN) {
+    return SWO_APD_DAT_23;
+  }
+
   switch (apdu_buffer[APDU_SECURE_DATA_OFF]) {
     case INS_RECOVER_VALIDATE_P1_COMMIT:
       if ((err = cx_sha256_update(&G_dashboard.transient_ctx.load_hash_ctx,
@@ -794,6 +804,23 @@ bolos_err_t dashboard_apdu_secure_recover_restore_seed(uint8_t* apdu_buffer,
     return SWO_APD_DAT_25;
   }
 
+  offset = APDU_SECURE_DATA_OFF + 1;
+  if (apdu_buffer[offset] <= AES_SIV_TAG_LEN) {
+    return SWO_APD_DAT_25;
+  }
+
+  if ((G_dashboard.transient_ctx.recover.state &
+       STATE_RECOVER_CONFIRM_BACKUP) == 0) {
+    // Device was turned off after 'validate_backup_data'
+    os_perso_recover_state(&state, GET_STATE);
+    // The 4 most significant bits set STATE_RECOVER_CONFIRM_BACKUP
+    // and the 4 less significant bits set
+    // ONBOARDING_STATUS_RECOVER_RESTORE_SEED
+    if (RECOVER_CONFIRM_BACKUP_STATE(state) != STATE_RECOVER_CONFIRM_BACKUP) {
+      return SWO_APD_STA_33;
+    }
+  }
+
   // Get the number of bip39 words to derive from the master seed
   switch (apdu_buffer[APDU_SECURE_DATA_OFF]) {
     // default is 24 words
@@ -810,7 +837,6 @@ bolos_err_t dashboard_apdu_secure_recover_restore_seed(uint8_t* apdu_buffer,
 
   dashboard_recover_display(BOLOS_UX_PROCESSING);
 
-  offset = APDU_SECURE_DATA_OFF + 1;
   if (dashboard_ecdh(&G_dashboard.transient_ctx.recover.ephemeral_private,
                      CX_ECDH_X, G_dashboard.transient_ctx.host_public.W,
                      RECOVER_SECP256K1_PK_LEN,
@@ -891,13 +917,18 @@ bolos_err_t dashboard_apdu_secure_recover_delete_backup(uint8_t* apdu_buffer,
     return SWO_APD_DAT_26;
   }
 
+  offset = APDU_SECURE_DATA_OFF;
+  if (apdu_buffer[offset] <= AES_SIV_TAG_LEN) {
+    return SWO_APD_DAT_26;
+  }
+
   if (dashboard_ecdh(&G_dashboard.transient_ctx.recover.ephemeral_private,
                      CX_ECDH_X, G_dashboard.transient_ctx.host_public.W,
                      RECOVER_SECP256K1_PK_LEN, shared_key,
                      RECOVER_AES_SIV_KEY_LEN)) {
     return SWO_SEC_KEY_07;
   }
-  offset = APDU_SECURE_DATA_OFF;
+
   if ((err = dashboard_decrypt_and_verify(
            shared_key, apdu_buffer + offset + 1 + AES_SIV_TAG_LEN,
            apdu_buffer[offset] - AES_SIV_TAG_LEN, nonce,
